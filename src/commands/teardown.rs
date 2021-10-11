@@ -23,7 +23,7 @@ impl Teardown {
         debug!("{:?}", "Tearing down..");
         //TODO: Can we be more safe while converting PathBuf to string
         let _network_options = match network::NetworkOptions::load(&input_file.into_os_string().into_string().unwrap()) {
-            Ok(opts) => opts,
+            Ok(mut opts) => opts,
             Err(e) => panic!("{}", e),
         };
 
