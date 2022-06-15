@@ -1,6 +1,6 @@
 [package]
 name = "netavark"
-version = "1.0.2-dev"
+version = "1.0.4-dev"
 edition = "2018"
 authors = ["github.com/containers"]
 description = "A container network stack"
@@ -20,23 +20,22 @@ env_logger = "0.9.0"
 ipnet = { version = "2", features = ["serde"] }
 iptables = "0.5"
 libc = "0.2"
-log = "0.4.14"
-serde = { version = "1.0.136", features = ["derive"], optional = true }
+log = "0.4.17"
+serde = { version = "1.0.137", features = ["derive"], optional = true }
 serde-value = "0.7.0"
-serde_json = "1.0.79"
+serde_json = "1.0.81"
 simple-error = "0.2.3"
-sysctl = "0.4.3"
+sysctl = "0.4.4"
 url = "2.1.0"
-zbus = "2.0.1"
+zbus = "2.3.1"
 rtnetlink = "0.9.0"
 futures = "0.3.21"
-nix = "0.23.1"
+nix = "0.24.1"
 rand = "0.8.5"
-tokio = { version = "1.16.1", features = ["full"] }
-zvariant = "3.1.2"
+tokio = { version = "1.19.2", features = ["full"] }
+zvariant = "3.3.0"
 sha2 = "0.10.1"
 netlink-packet-route = "0.11"
 
 [build-dependencies]
-vergen = { version = "6.0.2", default-features = false, features = ["build", "rustc", "git"] }
-anyhow = "1.0"
+chrono = "*"
