@@ -22,6 +22,7 @@ const AARDVARK_COMMIT_LOCK: &str = "aardvark.lock";
 pub struct AardvarkEntry<'a> {
     pub network_name: &'a str,
     pub network_gateways: Vec<IpAddr>,
+    pub network_dns_servers: &'a Option<Vec<IpAddr>>,
     pub container_id: &'a str,
     pub container_ips_v4: Vec<Ipv4Addr>,
     pub container_ips_v6: Vec<Ipv6Addr>,

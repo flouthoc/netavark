@@ -43,6 +43,7 @@ impl Setup {
         }
         debug!("{:?}", "Setting up...");
         let network_options = network::types::NetworkOptions::load(input_file)?;
+        debug!("-----network options {:?}", network_options);
 
         let firewall_driver = match firewall::get_supported_firewall_driver() {
             Ok(driver) => driver,

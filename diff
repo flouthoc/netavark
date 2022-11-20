@@ -1,0 +1,39 @@
+diff --git a/src/commands/setup.rs b/src/commands/setup.rs
+index 48fb2e8..3b2dedd 100644
+--- a/src/commands/setup.rs
++++ b/src/commands/setup.rs
+@@ -43,6 +43,7 @@ impl Setup {
+         }
+         debug!("{:?}", "Setting up...");
+         let network_options = network::types::NetworkOptions::load(input_file)?;
++        debug!("-----network options {:?}", network_options);
+ 
+         let firewall_driver = match firewall::get_supported_firewall_driver() {
+             Ok(driver) => driver,
+diff --git a/src/dns/aardvark.rs b/src/dns/aardvark.rs
+index 2421d36..b180231 100644
+--- a/src/dns/aardvark.rs
++++ b/src/dns/aardvark.rs
+@@ -22,6 +22,7 @@ const AARDVARK_COMMIT_LOCK: &str = "aardvark.lock";
+ pub struct AardvarkEntry<'a> {
+     pub network_name: &'a str,
+     pub network_gateways: Vec<IpAddr>,
++    pub network_dns_servers: &'a Option<Vec<IpAddr>>,
+     pub container_id: &'a str,
+     pub container_ips_v4: Vec<Ipv4Addr>,
+     pub container_ips_v6: Vec<Ipv6Addr>,
+diff --git a/src/network/types.rs b/src/network/types.rs
+index e97a9f4..5707bb3 100644
+--- a/src/network/types.rs
++++ b/src/network/types.rs
+@@ -49,6 +49,10 @@ pub struct Network {
+     /// Subnets to use for this network.
+     #[serde(rename = "subnets")]
+     pub subnets: Option<Vec<Subnet>>,
++
++    /// Network DNS servers for aardvark-dns.
++    #[serde(rename = "network_dns_servers")]
++    pub network_dns_servers: Option<Vec<IpAddr>>,
+ }
+ 
+ /// NetworkOptions for a given container.
