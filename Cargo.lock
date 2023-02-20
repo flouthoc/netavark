@@ -1190,35 +1190,6 @@ checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
 
 [[package]]
 name = "netavark"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da8e3484317cc3c6b1fef5acc20da2e34ff021828e1133759f001ecf311391d4"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "env_logger 0.10.0",
- "fs2",
- "ipnet",
- "iptables",
- "libc",
- "log",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-sys",
- "nix 0.26.2",
- "rand",
- "serde",
- "serde-value",
- "serde_json",
- "sha2",
- "sysctl",
- "url",
- "zbus",
-]
-
-[[package]]
-name = "netavark"
 version = "1.6.0-dev"
 dependencies = [
  "anyhow",
@@ -1226,15 +1197,22 @@ dependencies = [
  "clap",
  "env_logger 0.10.0",
  "fs2",
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "http",
  "ipnet",
  "iptables",
  "libc",
  "log",
- "netavark_proxy",
+ "macaddr",
+ "mozim",
  "netlink-packet-core",
  "netlink-packet-route",
  "netlink-sys",
+ "nispor",
  "nix 0.26.2",
+ "prost",
  "rand",
  "serde",
  "serde-value",
@@ -1242,37 +1220,12 @@ dependencies = [
  "sha2",
  "sysctl",
  "tokio",
- "url",
- "zbus",
-]
-
-[[package]]
-name = "netavark_proxy"
-version = "0.1.0"
-source = "git+https://github.com/containers/netavark-dhcp-proxy#d628692795efa57a1ddc4d55c64399e7b1afae35"
-dependencies = [
- "clap",
- "env_logger 0.10.0",
- "futures-channel",
- "futures-core",
- "futures-util",
- "http",
- "ipnet",
- "log",
- "macaddr",
- "mozim",
- "netavark 1.4.0",
- "nispor",
- "prost",
- "rand",
- "rtnetlink",
- "serde",
- "serde_json",
- "tokio",
  "tokio-stream",
  "tonic",
  "tonic-build",
  "tower",
+ "url",
+ "zbus",
 ]
 
 [[package]]
@@ -1447,11 +1400,11 @@ dependencies = [
 
 [[package]]
 name = "num_cpus"
-version = "1.14.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6058e64324c71e02bc2b150e4f3bc8286db6c83092132ffa3f6b1eab0f9def5"
+checksum = "0fac9e2da13b5eb447a6ce3d392f23a29d8694bff781bf03a16cd9ac8697593b"
 dependencies = [
- "hermit-abi 0.1.19",
+ "hermit-abi 0.2.6",
  "libc",
 ]
 
@@ -1921,9 +1874,9 @@ dependencies = [
 
 [[package]]
 name = "signal-hook-registry"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
+checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
 dependencies = [
  "libc",
 ]
