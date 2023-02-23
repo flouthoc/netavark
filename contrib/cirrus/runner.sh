@@ -24,7 +24,7 @@ _run_build() {
     make all  # optimized/non-debug binaries
     # This will get scooped up and become part of the artifact archive.
     # Identify where the binary came from to benefit downstream consumers.
-    cat >> bin/netavark.info << EOF
+    cat | tee bin/netavark.info << EOF
 repo: $CIRRUS_REPO_CLONE_URL
 branch: $CIRRUS_BASE_BRANCH
 title: $CIRRUS_CHANGE_TITLE
@@ -34,29 +34,32 @@ task: https://cirrus-ci.com/task/$CIRRUS_TASK_ID
 EOF
 }
 
+_run_build_aarch64() {
+    _run_build
+}
+
 _run_validate() {
-    rustup install stable
-    rustup default stable
     make validate
 }
 
-_run_build_cross() {
-    make build_cross
-}
-
-_run_verify_vendor() {
-    # N/B: current repo. dir. contents produced by _run_build() above.
-    if ! git diff --no-ext-diff --quiet --exit-code; then
-        die "Found uncommited and necessary changes to vendoring, please fix, commit, and re-submit."
-    fi
+_run_validate_aarch64() {
+    _run_validate
 }
 
 _run_unit() {
     make unit
 }
 
+_run_unit_aarch64() {
+    _run_unit
+}
+
 _run_integration() {
     make integration
+}
+
+_run_integration_aarch64() {
+    _run_integration
 }
 
 show_env_vars
@@ -64,6 +67,7 @@ show_env_vars
 msg "************************************************************"
 msg "Toolchain details"
 msg "************************************************************"
+
 rustc --version
 cargo --version
 

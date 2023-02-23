@@ -1,55 +1,61 @@
+use crate::network::constants::DRIVER_BRIDGE;
 use crate::network::types;
-use log::log_enabled;
+
+use fs2::FileExt;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::prelude::*;
 use std::io::Result;
-use std::net::IpAddr;
+use std::io::{prelude::*, ErrorKind};
 use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 const SYSTEMD_CHECK_PATH: &str = "/run/systemd/system";
 const SYSTEMD_RUN: &str = "systemd-run";
+const AARDVARK_COMMIT_LOCK: &str = "aardvark.lock";
 
-#[derive(Debug, Clone)]
-pub struct AardvarkEntry {
-    pub network_name: String,
-    pub network_gateway_v4: String,
-    pub network_gateway_v6: String,
-    pub container_id: String,
-    pub container_ip_v4: String,
-    pub container_ip_v6: String,
-    pub container_name: Vec<String>,
+#[derive(Clone, Debug)]
+pub struct AardvarkEntry<'a> {
+    pub network_name: &'a str,
+    pub network_gateways: Vec<IpAddr>,
+    pub network_dns_servers: &'a Option<Vec<IpAddr>>,
+    pub container_id: &'a str,
+    pub container_ips_v4: Vec<Ipv4Addr>,
+    pub container_ips_v6: Vec<Ipv6Addr>,
+    pub container_names: Vec<String>,
+    pub container_dns_servers: &'a Option<Vec<IpAddr>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Aardvark {
-    // aardvark's config directory
+    /// aardvark's config directory
     pub config: String,
-    // tells if container is rootfull or rootless
+    /// tells if container is rootfull or rootless
     pub rootless: bool,
-    // path to the aardvark-dns binary
+    /// path to the aardvark-dns binary
     pub aardvark_bin: String,
+    /// port to bind to
+    pub port: String,
 }
 
 impl Aardvark {
-    pub fn new(config: String, rootless: bool, aardvark_bin: String) -> Self {
+    pub fn new(config: String, rootless: bool, aardvark_bin: String, port: u16) -> Self {
         Aardvark {
             config,
             rootless,
             aardvark_bin,
+            port: port.to_string(),
         }
     }
 
-    // On success retuns aardvark server's pid or returns -1;
-    fn get_aardvark_pid(&mut self) -> i32 {
+    /// On success retuns aardvark server's pid or returns -1;
+    fn get_aardvark_pid(&self) -> i32 {
         let path = Path::new(&self.config).join("aardvark.pid");
-        let pid: i32 = match fs::read_to_string(&path) {
+        let pid: i32 = match fs::read_to_string(path) {
             Ok(content) => match content.parse::<i32>() {
                 Ok(val) => val,
                 Err(_) => {
@@ -95,30 +101,28 @@ impl Aardvark {
             "--config",
             &self.config,
             "-p",
-            "53",
+            &self.port,
             "run",
         ]);
 
         log::debug!("start aardvark-dns: {:?}", aardvark_args);
 
-        let output = match log_enabled!(log::Level::Debug) {
-            true => Stdio::inherit(),
-            false => Stdio::null(),
-        };
-
-        Command::new(&aardvark_args[0])
+        // After https://github.com/containers/aardvark-dns/pull/148 this command
+        // will block till aardvark-dns's parent process returns back and let
+        // aardvark inherit all the fds.
+        Command::new(aardvark_args[0])
             .args(&aardvark_args[1..])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(output)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             // set RUST_LOG for aardvark
             .env("RUST_LOG", log::max_level().as_str())
-            .spawn()?;
+            .output()?;
 
         Ok(())
     }
 
-    pub fn notify(&mut self, start: bool) -> Result<()> {
+    pub fn notify(&self, start: bool) -> Result<()> {
         let aardvark_pid = self.get_aardvark_pid();
         if aardvark_pid != -1 {
             match signal::kill(Pid::from_raw(aardvark_pid), Signal::SIGHUP) {
@@ -144,10 +148,90 @@ impl Aardvark {
 
         Ok(())
     }
-    pub fn commit_entries(&mut self, entries: Vec<AardvarkEntry>) -> Result<()> {
-        for entry in entries {
-            match self.commit_entry(entry.clone()) {
+    pub fn commit_entries(&self, entries: Vec<AardvarkEntry>) -> Result<()> {
+        // Acquire fs lock to ensure other instance of aardvark cannot commit
+        // or start aardvark instance till already running instance has not
+        // completed its `commit` phase.
+        let lockfile_path = Path::new(&self.config)
+            .join("..")
+            .join(AARDVARK_COMMIT_LOCK);
+        let lockfile = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lockfile_path)
+        {
+            Ok(file) => file,
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to open/create lockfile {:?}: {}", &lockfile_path, e),
+                ));
+            }
+        };
+        if let Err(er) = lockfile.lock_exclusive() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Failed to acquire exclusive lock on {:?}: {}",
+                    lockfile_path, er
+                ),
+            ));
+        }
+
+        for entry in &entries {
+            let path = Path::new(&self.config).join(entry.network_name);
+
+            let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    // collect gateway
+                    let gws = entry
+                        .network_gateways
+                        .iter()
+                        .map(|g| g.to_string())
+                        .collect::<Vec<String>>()
+                        .join(",");
+
+                    // collect network dns servers if specified
+                    let network_dns_servers =
+                        if let Some(network_dns_servers) = &entry.network_dns_servers {
+                            if !network_dns_servers.is_empty() {
+                                let dns_server_collected = network_dns_servers
+                                    .iter()
+                                    .map(|g| g.to_string())
+                                    .collect::<Vec<String>>()
+                                    .join(",");
+                                format!(" {}", dns_server_collected)
+                            } else {
+                                "".to_string()
+                            }
+                        } else {
+                            "".to_string()
+                        };
+
+                    let data = format!("{}{}\n", gws, network_dns_servers);
+                    f.write_all(data.as_bytes())?; // return error if write fails
+                    f
+                }
+                Err(ref e) if e.kind() == ErrorKind::AlreadyExists => {
+                    OpenOptions::new().append(true).open(&path)?
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+            match Aardvark::commit_entry(entry, file) {
                 Err(er) => {
+                    // drop lockfile when commit is completed
+                    if let Err(er) = lockfile.unlock() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "Failed to unlock exclusive lock on {:?}: {}",
+                                lockfile_path, er
+                            ),
+                        ));
+                    }
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("Failed to commit entry {:?}: {}", entry, er),
@@ -157,39 +241,54 @@ impl Aardvark {
             }
         }
 
+        // drop lockfile when commit is completed
+        if let Err(er) = lockfile.unlock() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Failed to unlock exclusive lock on {:?}: {}",
+                    lockfile_path, er
+                ),
+            ));
+        }
         Ok(())
     }
 
-    pub fn commit_entry(&mut self, entry: AardvarkEntry) -> Result<()> {
-        let mut data: String;
-        let path = Path::new(&self.config).join(entry.network_name);
-        let file_exists = path.exists();
-        let mut file = OpenOptions::new().append(true).create(true).open(&path)?;
-        // check if this is the first container in this network
-        if !file_exists {
-            // write first line as gateway ip
-            if !entry.network_gateway_v4.is_empty() && !entry.network_gateway_v6.is_empty() {
-                data = format!(
-                    "{},{}\n",
-                    entry.network_gateway_v4, entry.network_gateway_v6
-                );
-            } else if !entry.network_gateway_v4.is_empty() {
-                data = format!("{}\n", entry.network_gateway_v4);
-            } else {
-                data = format!("{}\n", entry.network_gateway_v6);
-            }
-            file.write_all(data.as_bytes())?;
-        }
+    fn commit_entry(entry: &AardvarkEntry, mut file: File) -> Result<()> {
+        let container_names = entry.container_names.join(",");
 
-        let container_names = entry
-            .container_name
+        let ipv4s = entry
+            .container_ips_v4
             .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<_>>()
+            .map(|g| g.to_string())
+            .collect::<Vec<String>>()
             .join(",");
-        data = format!(
-            "{} {} {} {}\n",
-            entry.container_id, entry.container_ip_v4, entry.container_ip_v6, container_names
+
+        let ipv6s = entry
+            .container_ips_v6
+            .iter()
+            .map(|g| g.to_string())
+            .collect::<Vec<String>>()
+            .join(",");
+
+        let dns_server = if let Some(dns_servers) = &entry.container_dns_servers {
+            if !dns_servers.is_empty() {
+                let dns_server_collected = dns_servers
+                    .iter()
+                    .map(|g| g.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",");
+                format!(" {}", dns_server_collected)
+            } else {
+                "".to_string()
+            }
+        } else {
+            "".to_string()
+        };
+
+        let data = format!(
+            "{} {} {} {}{}\n",
+            entry.container_id, ipv4s, ipv6s, container_names, dns_server
         );
 
         file.write_all(data.as_bytes())?; // return error if write fails
@@ -197,19 +296,7 @@ impl Aardvark {
         Ok(())
     }
 
-    pub fn commit_netavark_entries(
-        &mut self,
-        container_name: String,
-        container_id: String,
-        per_network_opts: HashMap<String, types::PerNetworkOptions>,
-        netavark_res: HashMap<String, types::StatusBlock>,
-    ) -> Result<()> {
-        let entries = Aardvark::netavark_response_to_aardvark_entries(
-            container_name,
-            container_id,
-            per_network_opts,
-            netavark_res,
-        );
+    pub fn commit_netavark_entries(&self, entries: Vec<AardvarkEntry>) -> Result<()> {
         if !entries.is_empty() {
             self.commit_entries(entries)?;
             self.notify(true)?;
@@ -217,120 +304,94 @@ impl Aardvark {
         Ok(())
     }
 
-    pub fn netavark_response_to_aardvark_entries(
-        container_name: String,
-        container_id: String,
-        per_network_opts: HashMap<String, types::PerNetworkOptions>,
-        netavark_res: HashMap<String, types::StatusBlock>,
-    ) -> Vec<AardvarkEntry> {
-        let mut result: Vec<AardvarkEntry> = Vec::<AardvarkEntry>::new();
-        for (key, network) in netavark_res {
-            let network_name = key.clone();
-            if let Some(dns_server_ips) = network.dns_server_ips {
-                if !dns_server_ips.is_empty() {
-                    match network.interfaces {
-                        None => continue,
-                        Some(interfaces) => {
-                            for (_interface_name, interface) in interfaces {
-                                match interface.subnets {
-                                    Some(subnets) => {
-                                        for subnet in subnets {
-                                            let mut network_gateway_v4: String = "".to_string();
-                                            let mut network_gateway_v6: String = "".to_string();
-                                            let mut container_ip_v4: String = "".to_string();
-                                            let mut container_ip_v6: String = "".to_string();
-                                            let container_ip = subnet.ipnet.addr();
-                                            let gateway = match subnet.gateway {
-                                                Some(gateway) => gateway,
-                                                None => IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-                                            };
-
-                                            if !gateway.is_unspecified() {
-                                                if gateway.is_ipv4() {
-                                                    network_gateway_v4 = gateway.to_string();
-                                                } else {
-                                                    network_gateway_v6 = gateway.to_string();
-                                                }
-                                            }
-
-                                            if container_ip.is_ipv4() {
-                                                container_ip_v4 = container_ip.to_string();
-                                            } else {
-                                                container_ip_v6 = container_ip.to_string();
-                                            }
-
-                                            let mut name_vector =
-                                                Vec::from([container_name.clone()]);
-                                            if let Some(network_opt) =
-                                                &per_network_opts.get(&network_name)
-                                            {
-                                                if let Some(alias) = &network_opt.aliases {
-                                                    let aliases = alias.clone();
-                                                    name_vector.extend(aliases);
-                                                }
-                                            }
-
-                                            result.push(AardvarkEntry {
-                                                network_name: network_name.clone(),
-                                                network_gateway_v4,
-                                                network_gateway_v6,
-                                                container_id: container_id.clone(),
-                                                container_ip_v6,
-                                                container_ip_v4,
-                                                container_name: name_vector,
-                                            });
-                                        }
-                                    }
-                                    None => continue,
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    pub fn delete_entry(&mut self, container_id: String, network_name: String) -> Result<()> {
+    pub fn delete_entry(&self, container_id: &str, network_name: &str) -> Result<()> {
         let path = Path::new(&self.config).join(network_name);
         let file_content = fs::read_to_string(&path)?;
-        let lines: Vec<&str> = file_content.split('\n').collect();
+        let lines: Vec<&str> = file_content.split_terminator('\n').collect();
 
-        let mut idx = 1;
+        let mut idx = 0;
         let mut file = File::create(&path)?;
 
-        for line in &lines {
-            if line.contains(&container_id) {
-                if lines.len() <= 3 {
-                    // delete the file and return
-                    // since there is nothing in the network
-                    fs::remove_file(&path)?;
-                    return Ok(());
-                }
-                idx += 1;
+        for line in lines {
+            if line.contains(container_id) {
                 continue;
             }
             file.write_all(line.as_bytes())?;
-            if idx < lines.len() {
-                file.write_all(b"\n")?;
-            }
+            file.write_all(b"\n")?;
             idx += 1;
+        }
+        // nothing left in file (only header), remove it
+        if idx <= 1 {
+            fs::remove_file(&path)?
         }
         Ok(())
     }
 
+    // Modifies network dns_servers for a specific network and notifies aardvark-dns server
+    // with the change.
+    pub fn modify_network_dns_servers(
+        &self,
+        network_name: &str,
+        network_dns_servers: &Vec<String>,
+    ) -> Result<()> {
+        let mut dns_servers_modified = false;
+        let path = Path::new(&self.config).join(network_name);
+        let file_content = fs::read_to_string(&path)?;
+
+        let mut file = File::create(&path)?;
+
+        //for line in lines {
+        for (idx, line) in file_content.split_terminator('\n').enumerate() {
+            if idx == 0 {
+                // If this is first line, we have to modify this
+                // first line has a format of `<BINDIP>... <NETWORK_DNSSERVERS>..`
+                // We will read the first line and get the first coloumn and
+                // override the second coloumn with new network dns servers.
+                let network_parts = line.split(' ').collect::<Vec<&str>>();
+                if network_parts.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("invalid network configuration file: {}", path.display()),
+                    ));
+                }
+                let network_dns_servers_collected = if !network_dns_servers.is_empty() {
+                    dns_servers_modified = true;
+                    let dns_server_collected = network_dns_servers
+                        .iter()
+                        .map(|g| g.to_string())
+                        .collect::<Vec<String>>()
+                        .join(",");
+                    format!(" {}", dns_server_collected)
+                } else {
+                    "".to_string()
+                };
+                // Modify line to support new format
+                let content = format!("{}{}", network_parts[0], network_dns_servers_collected);
+                file.write_all(content.as_bytes())?;
+            } else {
+                file.write_all(line.as_bytes())?;
+            }
+            file.write_all(b"\n")?;
+        }
+
+        // If dns servers were updated notify the aardvark-dns server
+        // if refresh is needed.
+        if dns_servers_modified {
+            self.notify(false)?;
+        }
+
+        Ok(())
+    }
+
     pub fn delete_from_netavark_entries(
-        &mut self,
-        network_options: types::NetworkOptions,
+        &self,
+        network_options: &types::NetworkOptions,
     ) -> Result<()> {
         let mut modified = false;
-        let container_id = network_options.container_id;
-        for (key, network) in network_options.network_info {
-            if network.dns_enabled {
+        for (key, network) in &network_options.network_info {
+            if network.dns_enabled && network.driver == DRIVER_BRIDGE {
                 modified = true;
-                self.delete_entry(container_id.clone(), key)?;
+                self.delete_entry(&network_options.container_id, key)?;
             }
         }
         if modified {

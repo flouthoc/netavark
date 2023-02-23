@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 use netavark::commands::setup;
 use netavark::commands::teardown;
+use netavark::commands::update;
 use netavark::commands::version;
 
 #[derive(Parser, Debug)]
@@ -28,6 +29,8 @@ struct Opts {
 enum SubCommand {
     /// Configures the given network namespace with the given configuration.
     Setup(setup::Setup),
+    /// Updates network dns servers for an already configured network.
+    Update(update::Update),
     /// Undo any configuration applied via setup command.
     Teardown(teardown::Teardown),
     /// Display info about netavark.
@@ -38,28 +41,24 @@ fn main() {
     env_logger::builder().format_timestamp(None).init();
     let opts = Opts::parse();
 
-    let file = opts.file.unwrap_or_else(|| String::from("/dev/stdin"));
     // aardvark config directory must be supplied by parent or it defaults to /tmp/aardvark
-    let config = opts.config.unwrap_or_else(|| String::from("/tmp"));
+    let config = opts.config.as_deref().unwrap_or("/tmp");
     let rootless = opts.rootless.unwrap_or(false);
     let aardvark_bin = opts
         .aardvark_binary
         .unwrap_or_else(|| String::from("/usr/libexec/podman/aardvark-dns"));
     let result = match opts.subcmd {
-        SubCommand::Setup(setup) => setup.exec(file, config, aardvark_bin, rootless),
-        SubCommand::Teardown(teardown) => teardown.exec(file, config, aardvark_bin, rootless),
+        SubCommand::Setup(setup) => setup.exec(opts.file, config, aardvark_bin, rootless),
+        SubCommand::Teardown(teardown) => teardown.exec(opts.file, config, aardvark_bin, rootless),
+        SubCommand::Update(update) => update.exec(config, aardvark_bin, rootless),
         SubCommand::Version(version) => version.exec(),
     };
 
     match result {
         Ok(_) => {}
         Err(err) => {
-            let er = netavark::error::NetavarkError {
-                error: format!("{}", err),
-                errno: 1,
-            };
-            er.print_json();
-            std::process::exit(er.errno);
+            err.print_json();
+            std::process::exit(err.get_exit_code());
         }
     }
 }

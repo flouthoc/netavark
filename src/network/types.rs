@@ -49,6 +49,10 @@ pub struct Network {
     /// Subnets to use for this network.
     #[serde(rename = "subnets")]
     pub subnets: Option<Vec<Subnet>>,
+
+    /// Network DNS servers for aardvark-dns.
+    #[serde(rename = "network_dns_servers")]
+    pub network_dns_servers: Option<Vec<IpAddr>>,
 }
 
 /// NetworkOptions for a given container.
@@ -77,18 +81,19 @@ pub struct NetworkOptions {
     /// The port mappings for this container.
     #[serde(rename = "port_mappings")]
     pub port_mappings: Option<Vec<PortMapping>>,
+
+    /// Custom DNS servers for aardvark-dns.
+    #[serde(rename = "dns_servers")]
+    pub dns_servers: Option<Vec<IpAddr>>,
 }
 
-// PerNetworkOptions are options which should be set on a per network basis
+/// PerNetworkOptions are options which should be set on a per network basis
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PerNetworkOptions {
     /// Aliases contains a list of names which the dns server should resolve
     /// to this container. Should only be set when DNSEnabled is true on the Network.
     /// If aliases are set but there is no dns support for this network the
     /// network interface implementation should ignore this and NOT error.
-
-    // DNS is not yet implemented
-
     #[serde(rename = "aliases")]
     pub aliases: Option<Vec<String>>,
 
@@ -105,7 +110,7 @@ pub struct PerNetworkOptions {
     pub static_mac: Option<String>,
 }
 
-// PortMapping is one or more ports that will be mapped into the container.
+/// PortMapping is one or more ports that will be mapped into the container.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortMapping {
     /// ContainerPort is the port number that will be exposed from the
@@ -142,18 +147,18 @@ pub struct PortMapping {
     pub range: u16,
 }
 
-// StatusBlock contains the network information about a container
-// connected to one Network.
+/// StatusBlock contains the network information about a container
+/// connected to one Network.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusBlock {
-    // Aardvark supports resolving queries with
-    // having fewer than ndots dots. So we dont
-    // need this as of now.
-    // DNS search domains for /etc/resolv.conf
+    /// Aardvark supports resolving queries with
+    /// having fewer than ndots dots. So we dont
+    /// need this as of now.
+    /// DNS search domains for /etc/resolv.conf
     #[serde(rename = "dns_search_domains")]
     pub dns_search_domains: Option<Vec<String>>,
 
-    // DNS nameservers /etc/resolv.conf will be populated by these
+    /// DNS nameservers /etc/resolv.conf will be populated by these
     #[serde(rename = "dns_server_ips")]
     pub dns_server_ips: Option<Vec<IpAddr>>,
 
@@ -204,7 +209,7 @@ pub struct Subnet {
     pub subnet: IpNet,
 }
 
-// LeaseRange contains the range where IP are leased.
+/// LeaseRange contains the range where IP are leased.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LeaseRange {
     /// EndIP last IP in the subnet which should be used to assign ips.

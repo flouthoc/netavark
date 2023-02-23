@@ -1,23 +1,17 @@
 //! Configures the given network namespace with provided specs
 use crate::dns::aardvark::Aardvark;
-use crate::error::NetavarkError;
+use crate::error::{NetavarkError, NetavarkResult};
 use crate::firewall;
-use crate::firewall::iptables::MAX_HASH_SIZE;
-use crate::network;
-use crate::network::core_utils::CoreUtils;
-use crate::network::internal_types::{PortForwardConfig, SetupNetwork};
-use crate::network::types::Subnet;
+use crate::network::driver::{get_network_driver, DriverInfo};
+use crate::network::netlink::LinkID;
+use crate::network::{self};
 use crate::network::{core_utils, types};
-use clap::Parser;
-use log::{debug, info};
-use std::collections::HashMap;
-use std::error::Error;
-use std::fs;
-use std::net::IpAddr;
-use std::path::Path;
 
-const IPV4_FORWARD: &str = "net.ipv4.ip_forward";
-const IPV6_FORWARD: &str = "/proc/sys/net/ipv6/conf/all/forwarding";
+use clap::Parser;
+use log::{debug, error, info};
+use std::collections::HashMap;
+use std::fs::{self};
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 pub struct Setup {
@@ -36,187 +30,98 @@ impl Setup {
 
     pub fn exec(
         &self,
-        input_file: String,
-        config_dir: String,
+        input_file: Option<String>,
+        config_dir: &str,
         aardvark_bin: String,
         rootless: bool,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> NetavarkResult<()> {
         match network::validation::ns_checks(&self.network_namespace_path) {
             Ok(_) => (),
             Err(e) => {
-                bail!("invalid namespace path: {}", e);
+                return Err(NetavarkError::wrap("invalid namespace path", e));
             }
         }
         debug!("{:?}", "Setting up...");
-
-        let network_options = match network::types::NetworkOptions::load(&input_file) {
-            Ok(opts) => opts,
-            Err(e) => {
-                return Err(Box::new(NetavarkError {
-                    error: format!("failed to load network options: {}", e),
-                    errno: 1,
-                }));
-            }
-        };
+        let network_options = network::types::NetworkOptions::load(input_file)?;
 
         let firewall_driver = match firewall::get_supported_firewall_driver() {
             Ok(driver) => driver,
             Err(e) => return Err(e),
         };
 
-        // Sysctl setup
-        // set ipv4 forwarding to 1
-        core_utils::CoreUtils::apply_sysctl_value(IPV4_FORWARD, "1")?;
-
         let mut response: HashMap<String, types::StatusBlock> = HashMap::new();
+
+        let dns_port = core_utils::get_netavark_dns_port()?;
+
+        let (mut hostns, mut netns) =
+            core_utils::open_netlink_sockets(&self.network_namespace_path)?;
+
+        // setup loopback, it should be safe to assume that 1 is the loopback index
+        netns.netlink.set_up(LinkID::ID(1))?;
+
+        let mut drivers = Vec::with_capacity(network_options.network_info.len());
 
         // Perform per-network setup
         for (net_name, network) in network_options.network_info.iter() {
-            debug!(
-                "Setting up network {} with driver {}",
-                net_name, network.driver
-            );
-            // set ipv6 forwarding to 1
-            if network.ipv6_enabled {
-                core_utils::CoreUtils::apply_sysctl_value(IPV6_FORWARD, "1")?;
-            }
-            // If the network is internal, we override the global setting and disabled forwarding
-            // on a per interface instance
-            match network.driver.as_str() {
-                "bridge" => {
-                    let per_network_opts =
-                        network_options.networks.get(net_name).ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("network options for network {} not found", net_name),
-                            )
-                        })?;
-                    // Configure Bridge and veth_pairs
-                    let status_block = network::core::Core::bridge_per_podman_network(
-                        per_network_opts,
-                        network,
-                        &self.network_namespace_path,
-                    )?;
-                    response.insert(net_name.to_owned(), status_block);
-                    if network.internal {
-                        match &network.network_interface {
-                            None => {}
-                            Some(i) => {
-                                core_utils::CoreUtils::apply_sysctl_value(
-                                    format!("/proc/sys/net/ipv4/conf/{}/forwarding", i).as_str(),
-                                    "0",
-                                )?;
-                                if network.ipv6_enabled {
-                                    core_utils::CoreUtils::apply_sysctl_value(
-                                        format!("/proc/sys/net/ipv6/conf/{}/forwarding", i)
-                                            .as_str(),
-                                        "0",
-                                    )?;
-                                }
-                            }
-                        };
-                        continue;
-                    }
-                    let id_network_hash = CoreUtils::create_network_hash(net_name, MAX_HASH_SIZE);
-                    let sn = SetupNetwork {
-                        net: network.clone(),
-                        network_hash_name: id_network_hash.clone(),
-                    };
-                    firewall_driver.setup_network(sn)?;
-                    let port_bindings = network_options.port_mappings.clone();
-                    match port_bindings {
-                        None => {}
-                        Some(i) => {
-                            let container_ips =
-                                per_network_opts.static_ips.as_ref().ok_or_else(|| {
-                                    std::io::Error::new(
-                                        std::io::ErrorKind::Other,
-                                        "no container ip provided",
-                                    )
-                                })?;
-                            let networks = network.subnets.as_ref().ok_or_else(|| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "no network address provided",
+            let per_network_opts = network_options.networks.get(net_name).ok_or_else(|| {
+                NetavarkError::Message(format!(
+                    "network options for network {} not found",
+                    net_name
+                ))
+            })?;
+
+            let mut driver = get_network_driver(DriverInfo {
+                firewall: firewall_driver.as_ref(),
+                container_id: &network_options.container_id,
+                container_name: &network_options.container_name,
+                container_dns_servers: &network_options.dns_servers,
+                netns_host: hostns.fd,
+                netns_container: netns.fd,
+                netns_path: &self.network_namespace_path,
+                network,
+                per_network_opts,
+                port_mappings: &network_options.port_mappings,
+                dns_port,
+            })?;
+
+            // validate before we do anything
+            driver.validate()?;
+
+            drivers.push(driver);
+        }
+
+        let mut aardvark_entries = Vec::new();
+
+        // Only now after we validated all drivers we setup each.
+        // If there is an error we have to tear down all previous drivers.
+        for (i, driver) in drivers.iter().enumerate() {
+            let (status, aardvark_entry) =
+                match driver.setup((&mut hostns.netlink, &mut netns.netlink)) {
+                    Ok((s, a)) => (s, a),
+                    Err(e) => {
+                        // now teardown the already setup drivers
+                        for dri in drivers.iter().take(i) {
+                            match dri.teardown((&mut hostns.netlink, &mut netns.netlink)) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!(
+                                    "failed to cleanup previous networks after setup failed: {}",
+                                    e
                                 )
-                            })?;
-                            let mut has_ipv4 = false;
-                            let mut has_ipv6 = false;
-                            let mut addr_v4: Option<IpAddr> = None;
-                            let mut addr_v6: Option<IpAddr> = None;
-                            let mut net_v4: Option<Subnet> = None;
-                            let mut net_v6: Option<Subnet> = None;
-                            for (idx, ip) in container_ips.iter().enumerate() {
-                                if ip.is_ipv4() {
-                                    if has_ipv4 {
-                                        continue;
-                                    }
-                                    addr_v4 = Some(*ip);
-                                    net_v4 = Some(networks[idx].clone());
-                                    has_ipv4 = true;
                                 }
-                                if ip.is_ipv6() {
-                                    if has_ipv6 {
-                                        continue;
-                                    }
-                                    addr_v6 = Some(*ip);
-                                    net_v6 = Some(networks[idx].clone());
-                                    has_ipv6 = true;
-                                }
-                            }
-                            let spf = PortForwardConfig {
-                                net: network.clone(),
-                                container_id: network_options.container_id.clone(),
-                                port_mappings: i.clone(),
-                                network_name: (*net_name).clone(),
-                                network_hash_name: id_network_hash.clone(),
-                                container_ip_v4: addr_v4,
-                                subnet_v4: net_v4,
-                                container_ip_v6: addr_v6,
-                                subnet_v6: net_v6,
                             };
-                            // Need to enable sysctl localnet so that traffic can pass
-                            // through localhost to containers
-                            match spf.net.network_interface.clone() {
-                                None => {}
-                                Some(i) => {
-                                    let localnet_path =
-                                        format!("net.ipv4.conf.{}.route_localnet", i);
-                                    CoreUtils::apply_sysctl_value(localnet_path, "1")?;
-                                }
-                            }
-                            firewall_driver.setup_port_forward(spf)?;
                         }
+                        return Err(e);
                     }
-                }
-                "macvlan" => {
-                    let per_network_opts =
-                        network_options.networks.get(net_name).ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("network options for network {} not found", net_name),
-                            )
-                        })?;
-                    //Configure Bridge and veth_pairs
-                    let status_block = network::core::Core::macvlan_per_podman_network(
-                        per_network_opts,
-                        network,
-                        &self.network_namespace_path,
-                    )?;
-                    response.insert(net_name.to_owned(), status_block);
-                }
-                // unknown driver
-                _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("unknown network driver {}", network.driver),
-                    )
-                    .into());
-                }
+                };
+
+            let _ = response.insert(driver.network_name(), status);
+            if let Some(a) = aardvark_entry {
+                aardvark_entries.push(a);
             }
         }
 
-        if Path::new(&aardvark_bin).exists() {
+        if Path::new(&aardvark_bin).exists() && !aardvark_entries.is_empty() {
             let path = Path::new(&config_dir).join("aardvark-dns");
 
             match fs::create_dir(path.as_path()) {
@@ -243,14 +148,9 @@ impl Setup {
                 }
             };
 
-            let mut aardvark_interface = Aardvark::new(path_string, rootless, aardvark_bin);
+            let aardvark_interface = Aardvark::new(path_string, rootless, aardvark_bin, dns_port);
 
-            if let Err(er) = aardvark_interface.commit_netavark_entries(
-                network_options.container_name,
-                network_options.container_id,
-                network_options.networks,
-                response.clone(),
-            ) {
+            if let Err(er) = aardvark_interface.commit_netavark_entries(aardvark_entries) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("Error while applying dns entries: {}", er),
